@@ -7,4 +7,7 @@ scikit-learn
 statsmodels
 matplotlib
 seaborn
+xgboost
+lightgbm
+shap
 jupyter

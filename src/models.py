@@ -1,11 +1,18 @@
+import logging
+import warnings
+from typing import Dict, Tuple, Any, Optional, List
+
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Any, Optional, List
+from lightgbm import LGBMRegressor
 from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import LinearRegression, RidgeCV, ElasticNetCV
-from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.neural_network import MLPRegressor
+from xgboost import XGBRegressor
+
+logging.getLogger("lightgbm").setLevel(logging.ERROR)
 
 
 class MacroFinanceModels:
@@ -41,14 +48,72 @@ class MacroFinanceModels:
                 n_iter_no_change=20,
                 random_state=self.random_state,
             ),
+            "XGBoost": GridSearchCV(
+                estimator=XGBRegressor(
+                    objective="reg:squarederror",
+                    n_estimators=300,
+                    max_depth=3,
+                    learning_rate=0.05,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_alpha=0.1,
+                    reg_lambda=1.0,
+                    random_state=self.random_state,
+                    n_jobs=1,
+                ),
+                param_grid={
+                    "max_depth": [2, 3],
+                    "learning_rate": [0.03, 0.05],
+                    "n_estimators": [200, 300],
+                    "subsample": [0.8],
+                    "colsample_bytree": [0.8],
+                    "reg_alpha": [0.0, 0.1],
+                    "reg_lambda": [1.0, 2.0],
+                },
+                cv=self.cv,
+                scoring="neg_root_mean_squared_error",
+                n_jobs=1,
+            ),
+            "LightGBM": GridSearchCV(
+                estimator=LGBMRegressor(
+                    objective="regression",
+                    n_estimators=300,
+                    max_depth=3,
+                    learning_rate=0.05,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_alpha=0.1,
+                    reg_lambda=1.0,
+                    random_state=self.random_state,
+                    n_jobs=1,
+                    verbosity=-1,
+                ),
+                param_grid={
+                    "max_depth": [2, 3],
+                    "learning_rate": [0.03, 0.05],
+                    "n_estimators": [200, 300],
+                    "subsample": [0.8],
+                    "colsample_bytree": [0.8],
+                    "reg_alpha": [0.0, 0.1],
+                    "reg_lambda": [1.0, 2.0],
+                },
+                cv=self.cv,
+                scoring="neg_root_mean_squared_error",
+                n_jobs=1,
+            ),
         }
         self.trained_models: Dict[str, Any] = {}
 
     def _metrics(self, y_true: pd.Series, y_pred: np.ndarray) -> Dict[str, float]:
+        y_true_arr = np.asarray(y_true)
+        y_pred_arr = np.asarray(y_pred)
+        directional_accuracy = float(np.mean(np.sign(y_true_arr) == np.sign(y_pred_arr)) * 100.0)
+
         return {
-            "R2": r2_score(y_true, y_pred),
-            "RMSE": np.sqrt(mean_squared_error(y_true, y_pred)),
-            "MAE": mean_absolute_error(y_true, y_pred),
+            "R2": float(r2_score(y_true, y_pred)),
+            "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+            "MAE": float(mean_absolute_error(y_true, y_pred)),
+            "Directional Accuracy": directional_accuracy,
         }
 
     def fit_and_evaluate(
@@ -68,7 +133,10 @@ class MacroFinanceModels:
             if model_names and name not in model_names:
                 continue
 
-            model.fit(X_train, y_train)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                warnings.filterwarnings("ignore", message="No further splits with positive gain.*")
+                model.fit(X_train, y_train)
             self.trained_models[name] = model
 
             train_pred = model.predict(X_train)
@@ -86,6 +154,8 @@ class MacroFinanceModels:
                 "Test_RMSE": test_metrics["RMSE"],
                 "Train_MAE": train_metrics["MAE"],
                 "Test_MAE": test_metrics["MAE"],
+                "Train_Directional_Accuracy": train_metrics["Directional Accuracy"],
+                "Test_Directional_Accuracy": test_metrics["Directional Accuracy"],
             }
 
             if name == "RidgeCV":
@@ -93,6 +163,8 @@ class MacroFinanceModels:
             if name == "ElasticNetCV":
                 row["Alpha"] = float(model.alpha_)
                 row["L1_ratio"] = float(model.l1_ratio_)
+            if name in {"XGBoost", "LightGBM"}:
+                row["Best_Params"] = str(model.best_params_)
 
             metrics.append(row)
 
@@ -113,3 +185,8 @@ class MacroFinanceModels:
         if model is None:
             raise ValueError(f"Model '{name}' has not been trained.")
         return model
+
+    def get_estimator(self, name: str) -> Any:
+        """Return the underlying estimator for a fitted model, including GridSearchCV results."""
+        model = self.get_model(name)
+        return getattr(model, "best_estimator_", model)
